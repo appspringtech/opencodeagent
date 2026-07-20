@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cancer Cellular Automata Simulation</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; line-height: 1.4; }
+    canvas { border: 1px solid #ccc; image-rendering: pixelated; }
+    .controls { margin: 12px 0; display: flex; gap: 8px; flex-wrap: wrap; }
+    button { padding: 8px 12px; cursor: pointer; }
+    table { border-collapse: collapse; margin-top: 12px; width: 100%; max-width: 900px; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; }
+    th { background: #f4f4f4; }
+    .muted { color: #666; }
+  </style>
+</head>
+<body>
+  <h1>Cancer Cellular Automata</h1>
+  <p class="muted">Grid: 100x100. States: Normal (blue), Cancer (red), Curative (green).</p>
+
+  <canvas id="grid" width="100" height="100"></canvas>
+  <div class="controls">
+    <button id="stepBtn">Step</button>
+    <button id="playBtn">Play</button>
+    <button id="resetBtn">Reset (10% cancer)</button>
+    <button id="runAnalysesBtn">Run Scenario Analyses</button>
+  </div>
+
+  <p id="status"></p>
+
+  <h2>Cancer % Sweep (0% to 100%)</h2>
+  <div id="cancerSweep"></div>
+
+  <h2>Curative Introduction Sweep</h2>
+  <p class="muted">Initial cancer is fixed at 10%. Curative is introduced at steps 100, 200, ..., 1000 with 1% to 20% curative cells.</p>
+  <div id="curativeSweep"></div>
+
+  <script>
+    (function () {
+      const NORMAL = 0;
+      const CANCER = 1;
+      const CURATIVE = 2;
+
+      const ROWS = 100;
+      const COLS = 100;
+      const SIZE = ROWS * COLS;
+
+      const NEIGHBOR_OFFSETS = [
+        [-1, -1], [-1, 0], [-1, 1],
+        [0, -1],           [0, 1],
+        [1, -1],  [1, 0],  [1, 1]
+      ];
+
+      const RULES = [
+        // current NORMAL
+        NORMAL, CANCER, NORMAL,
+        // current CANCER
+        CANCER, CANCER, NORMAL,
+        // current CURATIVE
+        CURATIVE, CURATIVE, CURATIVE
+      ];
+
+      const canvas = document.getElementById('grid');
+      const ctx = canvas.getContext('2d');
+      const imageData = ctx.createImageData(COLS, ROWS);
+      const statusEl = document.getElementById('status');
+      const cancerSweepEl = document.getElementById('cancerSweep');
+      const curativeSweepEl = document.getElementById('curativeSweep');
+
+      let currentGrid = createGrid(0.1, 0);
+      let nextGrid = new Uint8Array(SIZE);
+      let running = false;
+      let tickHandle = null;
+      let liveStep = 0;
+
+      function idx(r, c) {
+        return r * COLS + c;
+      }
+
+      function wrapped(v, max) {
+        return (v + max) % max;
+      }
+
+      function createGrid(cancerRatio, curativeRatio) {
+        const g = new Uint8Array(SIZE);
+        for (let i = 0; i < SIZE; i++) {
+          const rnd = Math.random();
+          if (rnd < curativeRatio) {
+            g[i] = CURATIVE;
+          } else if (rnd < curativeRatio + cancerRatio) {
+            g[i] = CANCER;
+          } else {
+            g[i] = NORMAL;
+          }
+        }
+        return g;
+      }
+
+      function countStates(grid) {
+        let normal = 0;
+        let cancer = 0;
+        let curative = 0;
+        for (let i = 0; i < SIZE; i++) {
+          if (grid[i] === NORMAL) normal++;
+          else if (grid[i] === CANCER) cancer++;
+          else curative++;
+        }
+        return { normal, cancer, curative };
+      }
+
+      function stateHash(grid) {
+        let h = 2166136261;
+        for (let i = 0; i < SIZE; i++) {
+          h ^= (grid[i] + 1);
+          h = Math.imul(h, 16777619);
+        }
+        return (h >>> 0).toString(16);
+      }
+
+      function step(grid, buffer) {
+        let changed = 0;
+
+        for (let r = 0; r < ROWS; r++) {
+          for (let c = 0; c < COLS; c++) {
+            const i = idx(r, c);
+            const current = grid[i];
+
+            const choice = NEIGHBOR_OFFSETS[(Math.random() * 8) | 0];
+            const nr = wrapped(r + choice[0], ROWS);
+            const nc = wrapped(c + choice[1], COLS);
+            const neighbor = grid[idx(nr, nc)];
+
+            const next = RULES[current * 3 + neighbor];
+            buffer[i] = next;
+            if (next !== current) changed++;
+          }
+        }
+
+        return changed;
+      }
+
+      function introduceCurative(grid, ratio) {
+        const target = Math.round(SIZE * ratio);
+        let added = 0;
+        const seen = new Set();
+        while (added < target && seen.size < SIZE) {
+          const pick = (Math.random() * SIZE) | 0;
+          if (seen.has(pick)) continue;
+          seen.add(pick);
+          grid[pick] = CURATIVE;
+          added++;
+        }
+      }
+
+      function runScenario(options) {
+        const {
+          initialCancer,
+          initialCurative = 0,
+          introCurative = 0,
+          introStep = null,
+          maxSteps = 5000,
+          firstExtensionStep = 1000,
+          secondExtensionStep = 2000
+        } = options;
+
+        let grid = createGrid(initialCancer, initialCurative);
+        let buffer = new Uint8Array(SIZE);
+        const seen = new Map();
+        seen.set(stateHash(grid), 0);
+
+        for (let stepIndex = 1; stepIndex <= maxSteps; stepIndex++) {
+          if (introStep !== null && stepIndex === introStep) {
+            introduceCurative(grid, introCurative);
+          }
+
+          const changed = step(grid, buffer);
+          const tmp = grid;
+          grid = buffer;
+          buffer = tmp;
+
+          if (changed === 0) {
+            return {
+              status: 'stable',
+              stableStep: stepIndex,
+              neededExtension:
+                stepIndex > secondExtensionStep ? 'beyond_2k' :
+                stepIndex > firstExtensionStep ? 'beyond_1k' :
+                'within_1k',
+              counts: countStates(grid)
+            };
+          }
+
+          const hash = stateHash(grid);
+          if (seen.has(hash)) {
+            return {
+              status: 'periodic_oscillation',
+              stableStep: null,
+              cycleFrom: seen.get(hash),
+              cycleTo: stepIndex,
+              counts: countStates(grid)
+            };
+          }
+          seen.set(hash, stepIndex);
+        }
+
+        return {
+          status: 'periodic_oscillation',
+          stableStep: null,
+          cycleFrom: null,
+          cycleTo: maxSteps,
+          counts: countStates(grid)
+        };
+      }
+
+      function renderGrid(grid) {
+        const data = imageData.data;
+        for (let i = 0; i < SIZE; i++) {
+          const offset = i * 4;
+          const state = grid[i];
+          if (state === NORMAL) {
+            data[offset] = 52; data[offset + 1] = 122; data[offset + 2] = 226;
+          } else if (state === CANCER) {
+            data[offset] = 214; data[offset + 1] = 69; data[offset + 2] = 65;
+          } else {
+            data[offset] = 46; data[offset + 1] = 161; data[offset + 2] = 46;
+          }
+          data[offset + 3] = 255;
+        }
+        ctx.putImageData(imageData, 0, 0);
+      }
+
+      function updateLiveStatus() {
+        const counts = countStates(currentGrid);
+        statusEl.textContent =
+          `Live step: ${liveStep} | Normal: ${counts.normal} | Cancer: ${counts.cancer} | Curative: ${counts.curative}`;
+      }
+
+      function liveStepOnce() {
+        step(currentGrid, nextGrid);
+        const tmp = currentGrid;
+        currentGrid = nextGrid;
+        nextGrid = tmp;
+        liveStep++;
+        renderGrid(currentGrid);
+        updateLiveStatus();
+      }
+
+      function setRunning(nextRunning) {
+        running = nextRunning;
+        document.getElementById('playBtn').textContent = running ? 'Pause' : 'Play';
+        if (running) {
+          const loop = () => {
+            if (!running) return;
+            liveStepOnce();
+            tickHandle = requestAnimationFrame(loop);
+          };
+          tickHandle = requestAnimationFrame(loop);
+        } else if (tickHandle) {
+          cancelAnimationFrame(tickHandle);
+          tickHandle = null;
+        }
+      }
+
+      function asPercent(value) {
+        return (value * 100).toFixed(0) + '%';
+      }
+
+      function renderTable(columns, rows) {
+        const table = document.createElement('table');
+        const thead = document.createElement('thead');
+        const trHead = document.createElement('tr');
+        columns.forEach(c => {
+          const th = document.createElement('th');
+          th.textContent = c;
+          trHead.appendChild(th);
+        });
+        thead.appendChild(trHead);
+        table.appendChild(thead);
+
+        const tbody = document.createElement('tbody');
+        rows.forEach(row => {
+          const tr = document.createElement('tr');
+          row.forEach(cell => {
+            const td = document.createElement('td');
+            td.textContent = String(cell);
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        return table;
+      }
+
+      async function runAllAnalyses() {
+        cancerSweepEl.textContent = 'Running cancer sweep...';
+        curativeSweepEl.textContent = 'Running curative introduction sweep...';
+
+        await new Promise(resolve => setTimeout(resolve, 0));
+
+        const cancerRows = [];
+        for (let p = 0; p <= 100; p += 10) {
+          const result = runScenario({ initialCancer: p / 100, maxSteps: 5000 });
+          cancerRows.push([
+            p + '%',
+            result.status,
+            result.stableStep ?? '-',
+            result.neededExtension ?? '-',
+            result.counts.normal,
+            result.counts.cancer,
+            result.counts.curative
+          ]);
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+
+        cancerSweepEl.innerHTML = '';
+        cancerSweepEl.appendChild(renderTable(
+          ['Initial Cancer', 'Result', 'Stable Step', 'Extension Used', 'Final Normal', 'Final Cancer', 'Final Curative'],
+          cancerRows
+        ));
+
+        const introSteps = [];
+        for (let s = 100; s <= 1000; s += 100) introSteps.push(s);
+
+        const curativeRows = [];
+        for (let curativePct = 1; curativePct <= 20; curativePct++) {
+          for (const introStep of introSteps) {
+            const result = runScenario({
+              initialCancer: 0.10,
+              introCurative: curativePct / 100,
+              introStep,
+              maxSteps: 2000,
+              firstExtensionStep: 1000,
+              secondExtensionStep: 2000
+            });
+
+            curativeRows.push([
+              '10%',
+              curativePct + '%',
+              introStep,
+              result.status,
+              result.stableStep ?? '-',
+              result.neededExtension ?? '-',
+              result.counts.normal,
+              result.counts.cancer,
+              result.counts.curative
+            ]);
+          }
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+
+        curativeSweepEl.innerHTML = '';
+        curativeSweepEl.appendChild(renderTable(
+          [
+            'Initial Cancer',
+            'Introduced Curative',
+            'Intro Step',
+            'Result',
+            'Stable Step',
+            'Extension Used',
+            'Final Normal',
+            'Final Cancer',
+            'Final Curative'
+          ],
+          curativeRows
+        ));
+      }
+
+      document.getElementById('stepBtn').addEventListener('click', () => {
+        setRunning(false);
+        liveStepOnce();
+      });
+
+      document.getElementById('playBtn').addEventListener('click', () => {
+        setRunning(!running);
+      });
+
+      document.getElementById('resetBtn').addEventListener('click', () => {
+        setRunning(false);
+        currentGrid = createGrid(0.1, 0);
+        nextGrid = new Uint8Array(SIZE);
+        liveStep = 0;
+        renderGrid(currentGrid);
+        updateLiveStatus();
+      });
+
+      document.getElementById('runAnalysesBtn').addEventListener('click', () => {
+        setRunning(false);
+        runAllAnalyses();
+      });
+
+      renderGrid(currentGrid);
+      updateLiveStatus();
+    })();
+  </script>
+</body>
+</html>
