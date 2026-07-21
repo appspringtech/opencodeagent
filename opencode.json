@@ -9,4 +9,7 @@
       "oauth": false,
       "headers": {
         "Authorization": "Bearer {env:PERSONAL_ACCESS_TOKEN}"
+      }
+    }
+  }
 }
